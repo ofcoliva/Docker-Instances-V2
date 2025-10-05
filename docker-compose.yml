@@ -1,0 +1,179 @@
+services:
+
+    libretranslate:
+        container_name: libretranslate
+        image: libretranslate/libretranslate:latest
+        ports:
+            - "9005:5000"
+        networks:
+            - cloudflare_tunnel_net
+
+        restart: unless-stopped
+
+        healthcheck:
+            test: [ 'CMD-SHELL', './venv/bin/python scripts/healthcheck.py' ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 5s
+        # Uncomment this for logging in docker compose logs
+        tty: true
+        # Uncomment above command and define your args if necessary
+        # command: --ssl --ga-id MY-GA-ID --req-limit 100 --char-limit 500
+        # Uncomment this section and the libretranslate_api_keys volume if you want to backup your API keys
+        environment:
+            - LT_API_KEYS=true
+            - LT_API_KEYS_DB_PATH=/app/db/api_keys.db # Same result as `db/api_keys.db` or `./db/api_keys.db`
+            # Uncomment these vars and libretranslate_models volume to optimize loading time.
+            - LT_UPDATE_MODELS=true
+            - LT_LOAD_ONLY=en,pt_br
+        volumes:
+            - libretranslate_api_keys_data:/app/db
+            # Keep the models in a docker volume, to avoid re-downloading on startup
+            - libretranslate_models_data:/home/libretranslate/.local:rw
+    registry:
+        image: registry:latest
+        container_name: registry
+        restart: unless-stopped
+        ports:
+            - 9004:5000
+        networks:
+            - cloudflare_tunnel_net
+        volumes:
+            - registry_data:/var/lib/registry
+        environment:
+            # Garante que a deleção de imagens seja habilitada na API do registry
+            - REGISTRY_STORAGE_DELETE_ENABLED=true
+
+    uptime-kuma:
+        image: louislam/uptime-kuma:latest
+        container_name: uptime-kuma
+        restart: unless-stopped
+        ports:
+            - "9003:9003"
+        networks:
+            - cloudflare_tunnel_net
+        volumes:
+            - uptime_kuma_data:/app/data
+        environment:
+            - TZ=UTC-3
+            - UMASK=0022
+            - PORT=9003 # Porta padrão 3001 remapeada internamente no container para 9003
+        healthcheck:
+            test: [ "CMD", "curl", "-f", "http://localhost:9003" ]
+            interval: 30s
+            retries: 3
+            start_period: 10s
+            timeout: 5s
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "10m"
+                max-file: "3"
+
+    forgejo:
+        image: codeberg.org/forgejo/forgejo:12
+        container_name: forgejo
+        environment:
+            - USER_UID=1000
+            - USER_GID=1000
+        restart: unless-stopped
+        volumes:
+            - forgejo_data:/data
+            - /etc/timezone:/etc/timezone:ro
+            - /etc/localtime:/etc/localtime:ro
+        ports:
+            - "9002:3000"
+            - "222:22"
+        networks:
+            - cloudflare_tunnel_net
+
+    vaultwarden:
+        image: vaultwarden/server:latest
+        container_name: vaultwarden
+        restart: unless-stopped
+        environment:
+            DOMAIN: ${VW_DOMAIN}
+            SIGNUPS_ALLOWED: "false" # set to true only to create first user
+            WEBSOCKET_ENABLED: "true"
+            ADMIN_TOKEN: ${ADMIN_TOKEN} # for /admin
+            # SMTP (recommended)
+            SMTP_HOST: "smtp.gmail.com"
+            SMTP_PORT: "587"
+            SMTP_SECURITY: "starttls"
+            SMTP_USERNAME: ${SMTP_USERNAME}
+            SMTP_PASSWORD: ${SMTP_PASSWORD}
+            SMTP_FROM: "ofcoliva@gmail.com"
+
+        ports:
+            - "9001:80"
+        healthcheck:
+            test: [ "CMD", "wget", "-q", "-O", "-", "http://localhost/health" ]
+            interval: 30s
+            timeout: 5s
+            retries: 5
+
+        volumes:
+            - vaultwarden_data:/data/
+        networks:
+            - cloudflare_tunnel_net
+
+    portainer:
+        image: portainer/portainer-ce:latest
+        container_name: portainer
+        restart: unless-stopped
+        ports:
+            - "9000:9000"
+        volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+            - portainer_data:/data
+        networks:
+            - cloudflare_tunnel_net
+
+    rclone-sync:
+        image: rclone/rclone:latest
+        container_name: rclone-sync
+        restart: unless-stopped
+        volumes:
+            - ./rclone_config:/config/rclone
+            # Monta os volumes dos outros serviços como APENAS LEITURA :ro
+            - uptime_kuma_data:/data/uptime_kuma:ro
+            - forgejo_data:/data/forgejo:ro
+            - vaultwarden_data:/data/vaultwarden:ro
+            - portainer_data:/data/portainer:ro
+            - registry_data:/data/registry:ro
+
+        entrypoint: /bin/sh
+        # Todos os volumes acima que foram montados em /data será enviado para a o diretório ${RCLONE_NAME}:Backups dentro de sua nuvem escolhida.
+        command: -c "while true; do rclone sync /data/ ${RCLONE_NAME}:Backups -v --log-file /dev/stdout; echo 'Backup finalizado. Aguardando ${BACKUP_SLEEP} segundos para o próximo'; sleep ${BACKUP_SLEEP}; done"
+
+    cloudflare-tunnel:
+        image: cloudflare/cloudflared:latest
+        container_name: cloudflare-tunnel
+        restart: unless-stopped
+        command: tunnel run --token ${CLOUDFLARE_TOKEN}
+        volumes:
+            - ~/.cloudflared:/etc/cloudflared
+        networks:
+            - cloudflare_tunnel_net
+
+networks:
+    cloudflare_tunnel_net:
+        name: cloudflare_tunnel_net
+        driver: bridge
+
+volumes:
+    portainer_data:
+        name: portainer_data
+    vaultwarden_data:
+        name: vaultwarden_data
+    forgejo_data:
+        name: forgejo_data
+    uptime_kuma_data:
+        name: uptime_kuma_data
+    registry_data:
+        name: registry_data
+    libretranslate_api_keys_data:
+        name: libretranslate_api_keys_data
+    libretranslate_models_data:
+        name: libretranslate_models_data
